@@ -1,4 +1,4 @@
-CREATE OR REPLACE FUNCTION rag_search_and_respond(input_params OBJECT)
+CREATE OR REPLACE FUNCTION rag_search_and_respond(INPUT_PARAMS OBJECT)
 RETURNS OBJECT
 LANGUAGE JAVASCRIPT
 AS
@@ -201,15 +201,15 @@ function generate_response(rag_results, last_question, context, debug) {
 // Main function execution
 try {
     // Input validation
-    validateInput(input_params);
+    validateInput(INPUT_PARAMS);
 
-    const service_id = input_params.service_id;
-    const latest_prompts = input_params.latest_prompts;
-    const debug = input_params.debug || false;
+    const service_id = INPUT_PARAMS.service_id;
+    const latest_prompts = INPUT_PARAMS.latest_prompts;
+    const debug = INPUT_PARAMS.debug || false;
 
     // Log input parameters if debug mode is enabled
     if (debug) {
-        snowflake.log('info', `Input parameters: ${JSON.stringify(input_params)}`);
+        snowflake.log('info', `Input parameters: ${JSON.stringify(INPUT_PARAMS)}`);
     }
 
     // Step 1: Get the RAG service name
