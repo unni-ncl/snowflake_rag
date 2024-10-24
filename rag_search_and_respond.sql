@@ -13,49 +13,62 @@ function validateInput(params) {
         throw new Error("Input must be a non-null object");
     }
 
-    if (!params.hasOwnProperty('domain_name')) {
-        throw new Error("Missing required parameter: domain_name");
+    // Validate service_id
+    if (!params.hasOwnProperty('service_id')) {
+        throw new Error("Missing required parameter: service_id");
+    }
+    if (typeof params.service_id !== 'string' || params.service_id.trim() === '') {
+        throw new Error("service_id must be a non-empty string");
     }
 
+    // Validate latest_prompts
     if (!params.hasOwnProperty('latest_prompts')) {
         throw new Error("Missing required parameter: latest_prompts");
     }
-
-    if (typeof params.domain_name !== 'string' || params.domain_name.trim() === '') {
-        throw new Error("domain_name must be a non-empty string");
-    }
-
     if (typeof params.latest_prompts !== 'object' || params.latest_prompts === null) {
         throw new Error("latest_prompts must be a non-null object");
     }
-
     if (Object.keys(params.latest_prompts).length === 0) {
         throw new Error("latest_prompts must contain at least one prompt");
     }
+    if (Object.keys(params.latest_prompts).length > 20) {
+        throw new Error("latest_prompts cannot contain more than 20 prompts");
+    }
 
+    // Validate each prompt
     for (let key in params.latest_prompts) {
-        if (typeof params.latest_prompts[key] !== 'string' || params.latest_prompts[key].trim() === '') {
-            throw new Error(`Prompt for key '${key}' must be a non-empty string`);
+        // Validate epoch timestamp key
+        if (isNaN(Number(key)) || Number(key) <= 0) {
+            throw new Error(`Invalid epoch timestamp key: ${key}`);
         }
+        // Validate prompt value
+        if (typeof params.latest_prompts[key] !== 'string' || params.latest_prompts[key].trim() === '') {
+            throw new Error(`Prompt for epoch ${key} must be a non-empty string`);
+        }
+    }
+
+    // Validate debug flag (optional)
+    if (params.hasOwnProperty('debug') && typeof params.debug !== 'boolean') {
+        throw new Error("debug flag must be a boolean value");
     }
 }
 
 /**
- * Retrieves the appropriate service name for a given domain.
- * @param {string} domain - The domain name to look up.
- * @returns {string} The service name associated with the domain.
- * @throws {Error} If no service is found for the domain and no default service is available.
+ * Retrieves the fully qualified RAG service name for a given service ID.
+ * @param {string} service_id - The service ID to look up.
+ * @returns {string} The fully qualified RAG service name.
+ * @throws {Error} If no active service is found.
  */
-function get_service_name(domain) {
+function get_rag_service_name(service_id) {
     const service_query = snowflake.createStatement({
         sqlText: `
-        SELECT service_name
-        FROM MYGPT.RAG.T_SERVICE_REGISTRY
-        WHERE domain_name = :1
-        ORDER BY effective_date DESC
+        SELECT fq_rag_service_name
+        FROM mygpt.profile.t_service_registry
+        WHERE service_id = :1
+          AND is_active = true
         LIMIT 1
         `,
-        binds: [domain]
+        binds: [service_id]
     });
     
     const result = service_query.execute();
@@ -63,39 +76,28 @@ function get_service_name(domain) {
     if (result.next()) {
         return result.getColumnValue(1);
     } else {
-        const default_query = snowflake.createStatement({
-            sqlText: `
-            SELECT service_name
-            FROM MYGPT.RAG.T_SERVICE_REGISTRY
-            WHERE domain_name = 'default'
-            ORDER BY effective_date DESC
-            LIMIT 1
-            `
-        });
-        
-        const default_result = default_query.execute();
-        
-        if (default_result.next()) {
-            return default_result.getColumnValue(1);
-        } else {
-            throw new Error(`No service found for domain '${domain}' and no default service available`);
-        }
+        throw new Error(`No active service found for service_id: ${service_id}`);
     }
 }
 
 /**
  * Summarizes a list of questions using Snowflake Cortex LLM.
- * @param {Object} questions - The object containing questions as key-value pairs.
+ * @param {Object} questions - The object containing questions with epoch timestamps.
+ * @param {boolean} debug - Flag indicating whether to enable debug logging.
  * @returns {string} A summary of the questions.
  * @throws {Error} If the summarization fails.
  */
-function summarize_questions(questions) {
-    // Sort the questions by their keys (assuming keys are sortable, like timestamps or sequence numbers)
-    const sortedKeys = Object.keys(questions).sort();
+function summarize_questions(questions, debug) {
+    // Sort the questions by epoch timestamp
+    const sortedKeys = Object.keys(questions).sort((a, b) => Number(a) - Number(b));
     const sortedQuestions = sortedKeys.map(key => questions[key]);
     
     const summarization_prompt = `Summarize the following questions, focusing on the context relevant to the last question. Emphasize the content of the last question in your summary:\n\n${sortedQuestions.join('\n')}`;
     
+    if (debug) {
+        snowflake.log('info', `Summarization prompt: ${summarization_prompt}`);
+    }
+
     const summary = snowflake.execute({
         sqlText: `
         SELECT SNOWFLAKE.CORTEX.COMPLETE(
@@ -118,12 +120,18 @@ function summarize_questions(questions) {
 
 /**
  * Performs a RAG search using the provided service name and query.
- * @param {string} service_name - The name of the search service to use.
+ * @param {string} rag_service_name - The fully qualified name of the search service.
  * @param {string} query - The search query.
+ * @param {boolean} debug - Flag indicating whether to enable debug logging.
  * @returns {Object} The search results.
  * @throws {Error} If the RAG search fails.
  */
-function perform_rag_search(service_name, query) {
+function perform_rag_search(rag_service_name, query, debug) {
+    if (debug) {
+        snowflake.log('info', `Performing RAG search with service: ${rag_service_name}`);
+        snowflake.log('info', `Search query: ${query}`);
+    }
+
     const search_results = snowflake.execute({
         sqlText: `
         SELECT PARSE_JSON(
@@ -136,7 +144,7 @@ function perform_rag_search(service_name, query) {
                 )
             )
         )['results'] as results`,
-        binds: [service_name, query]
+        binds: [rag_service_name, query]
     });
     
     if (search_results.next()) {
@@ -151,10 +159,11 @@ function perform_rag_search(service_name, query) {
  * @param {Object} rag_results - The results from the RAG search.
  * @param {string} last_question - The user's last question.
  * @param {string} context - The context derived from summarizing previous questions.
+ * @param {boolean} debug - Flag indicating whether to enable debug logging.
  * @returns {string} The generated response.
  * @throws {Error} If the response generation fails.
  */
-function generate_response(rag_results, last_question, context) {
+function generate_response(rag_results, last_question, context, debug) {
     const response_prompt = `
     Context: ${context}
     
@@ -165,6 +174,10 @@ function generate_response(rag_results, last_question, context) {
     
     Please provide a helpful response based on the context, RAG search results, and the user's question.`;
     
+    if (debug) {
+        snowflake.log('info', `Response generation prompt: ${response_prompt}`);
+    }
+
     const response = snowflake.execute({
         sqlText: `
         SELECT SNOWFLAKE.CORTEX.COMPLETE(
@@ -190,26 +203,40 @@ try {
     // Input validation
     validateInput(input_params);
 
-    const domain_name = input_params.domain_name;
+    const service_id = input_params.service_id;
     const latest_prompts = input_params.latest_prompts;
+    const debug = input_params.debug || false;
 
-    // Step 1: Determine the correct service name
-    const service_name = get_service_name(domain_name);
-    snowflake.log('info', `Using service: ${service_name}`);
+    // Log input parameters if debug mode is enabled
+    if (debug) {
+        snowflake.log('info', `Input parameters: ${JSON.stringify(input_params)}`);
+    }
+
+    // Step 1: Get the RAG service name
+    const rag_service_name = get_rag_service_name(service_id);
+    if (debug) {
+        snowflake.log('info', `Using RAG service: ${rag_service_name}`);
+    }
 
     // Step 2: Summarize and contextualize the latest questions
-    const question_summary = summarize_questions(latest_prompts);
-    snowflake.log('info', `Question summary: ${question_summary}`);
+    const question_summary = summarize_questions(latest_prompts, debug);
+    if (debug) {
+        snowflake.log('info', `Question summary: ${question_summary}`);
+    }
 
     // Step 3: Perform a RAG search using the summary
-    const rag_results = perform_rag_search(service_name, question_summary);
-    snowflake.log('info', `RAG search results: ${JSON.stringify(rag_results)}`);
+    const rag_results = perform_rag_search(rag_service_name, question_summary, debug);
+    if (debug) {
+        snowflake.log('info', `RAG search results: ${JSON.stringify(rag_results)}`);
+    }
 
     // Step 4: Generate a final response
-    const sortedKeys = Object.keys(latest_prompts).sort();
+    const sortedKeys = Object.keys(latest_prompts).sort((a, b) => Number(a) - Number(b));
     const last_question = latest_prompts[sortedKeys[sortedKeys.length - 1]];
-    const llm_response = generate_response(rag_results, last_question, question_summary);
-    snowflake.log('info', `Generated response: ${llm_response}`);
+    const llm_response = generate_response(rag_results, last_question, question_summary, debug);
+    if (debug) {
+        snowflake.log('info', `Generated response: ${llm_response}`);
+    }
 
     // Return the results
     return {
