@@ -1,3 +1,4 @@
+```sql
 -- Create error logging table
 CREATE TABLE IF NOT EXISTS mygpt.profile.t_error (
     error_id NUMBER IDENTITY(1,1),
@@ -33,7 +34,7 @@ $$
  */
 function logError(errorMessage, inputParams) {
     try {
-        snowflake.execute({
+        const stmt = snowflake.createStatement({
             sqlText: `
             INSERT INTO mygpt.profile.t_error (
                 procedure_name,
@@ -43,11 +44,10 @@ function logError(errorMessage, inputParams) {
             VALUES (?, ?, PARSE_JSON(?))`,
             binds: ['rag_search_and_respond', errorMessage, JSON.stringify(inputParams)]
         });
+        stmt.execute();
     } catch (logError) {
-        snowflake.execute({
-            sqlText: `SELECT system$log.error(?);`,
-            binds: [`Failed to log to error table: ${logError.message}`]
-        });
+        // If error logging fails, just continue
+        console.error(`Failed to log error: ${logError.message}`);
     }
 }
 
@@ -57,7 +57,7 @@ function logError(errorMessage, inputParams) {
 function logDebugInfo(serviceId, inputParams, summary, ragResults, llmResponse, startTime) {
     try {
         const executionTime = new Date().getTime() - startTime;
-        snowflake.execute({
+        const stmt = snowflake.createStatement({
             sqlText: `
             INSERT INTO mygpt.profile.t_debug_log (
                 service_id,
@@ -77,11 +77,9 @@ function logDebugInfo(serviceId, inputParams, summary, ragResults, llmResponse, 
                 executionTime
             ]
         });
+        stmt.execute();
     } catch (logError) {
-        snowflake.execute({
-            sqlText: `SELECT system$log.error(?);`,
-            binds: [`Failed to log debug info: ${logError.message}`]
-        });
+        console.error(`Failed to log debug info: ${logError.message}`);
     }
 }
 
@@ -120,7 +118,7 @@ try {
 
     // Step 1: Get the RAG service name
     let rag_service_name;
-    const service_result = snowflake.execute({
+    const service_stmt = snowflake.createStatement({
         sqlText: `
         SELECT fq_rag_service_name
         FROM mygpt.profile.t_service_registry
@@ -131,6 +129,7 @@ try {
         binds: [service_id]
     });
     
+    const service_result = service_stmt.execute();
     if (service_result.next()) {
         rag_service_name = service_result.getColumnValue(1);
     } else {
@@ -144,7 +143,7 @@ try {
 
     // Step 3: Generate question summary
     let question_summary;
-    const summary_result = snowflake.execute({
+    const summary_stmt = snowflake.createStatement({
         sqlText: `
         SELECT SNOWFLAKE.CORTEX.COMPLETE(
             'llama2-70b-chat',
@@ -157,6 +156,7 @@ try {
         binds: [summarization_prompt]
     });
     
+    const summary_result = summary_stmt.execute();
     if (summary_result.next()) {
         question_summary = summary_result.getColumnValue(1);
     } else {
@@ -165,7 +165,7 @@ try {
 
     // Step 4: Perform RAG search
     let rag_results;
-    const search_result = snowflake.execute({
+    const search_stmt = snowflake.createStatement({
         sqlText: `
         SELECT PARSE_JSON(
             SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
@@ -180,6 +180,7 @@ try {
         binds: [rag_service_name, question_summary]
     });
     
+    const search_result = search_stmt.execute();
     if (search_result.next()) {
         rag_results = search_result.getColumnValue(1);
     } else {
@@ -195,7 +196,7 @@ try {
     Please provide a helpful response based on the context, RAG search results, and the user's question.`;
 
     let llm_response;
-    const response_result = snowflake.execute({
+    const response_stmt = snowflake.createStatement({
         sqlText: `
         SELECT SNOWFLAKE.CORTEX.COMPLETE(
             'llama2-70b-chat',
@@ -208,6 +209,7 @@ try {
         binds: [response_prompt]
     });
     
+    const response_result = response_stmt.execute();
     if (response_result.next()) {
         llm_response = response_result.getColumnValue(1);
     } else {
@@ -273,3 +275,13 @@ SELECT *
 FROM mygpt.profile.t_error
 ORDER BY error_timestamp DESC
 LIMIT 5;
+```
+
+Key changes made:
+1. Removed `system$log` references
+2. Used `snowflake.createStatement` consistently
+3. Used console.error for logging failures
+4. Improved error handling in logging functions
+5. Maintained all debug and error logging functionality
+
+This version should work without the system$log errors. The logging will be done directly to the tables, and any logging failures will be handled gracefully without affecting the main procedure execution.
