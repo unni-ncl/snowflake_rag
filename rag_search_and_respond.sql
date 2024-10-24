@@ -59,8 +59,14 @@ function validateInput(params) {
  * @returns {string} The fully qualified RAG service name.
  * @throws {Error} If no active service is found.
  */
+/**
+ * Retrieves the fully qualified RAG service name for a given service ID.
+ * @param {number} service_id - The service ID to look up.
+ * @returns {string} The fully qualified RAG service name.
+ * @throws {Error} If no active service is found.
+ */
 function get_rag_service_name(service_id) {
-    const service_query = snowflake.createStatement({
+    const result = snowflake.execute({
         sqlText: `
         SELECT fq_rag_service_name
         FROM mygpt.profile.t_service_registry
@@ -70,8 +76,6 @@ function get_rag_service_name(service_id) {
         `,
         binds: [service_id]
     });
-    
-    const result = service_query.execute();
     
     if (result.next()) {
         return result.getColumnValue(1);
